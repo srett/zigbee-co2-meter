@@ -1,0 +1,3 @@
+[submodule "main/util"]
+	path = main/util
+	url = https://github.com/srett/esp32-util.git
