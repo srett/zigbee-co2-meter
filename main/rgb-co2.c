@@ -82,6 +82,9 @@ static struct {
     bool on;
 } led = {.co2_level = LED_CO2_LEVEL};
 
+// Sanity check reported sensor value. I've seen crazy high values twice in about a year now...
+#define CO2_IGNORE_BELOW 380
+#define CO2_IGNORE_ABOVE 3000
 // Delay zigbee init, to make sure we have stable CO2 values before we start reporting anything
 #define ZB_INIT_DELAY_MS 20000
 // Number of probes to pick minimum value from
@@ -377,8 +380,8 @@ esp_err_t zbcb_register_device(void)
     // CO2 sensor endpoint
     esp_zb_carbon_dioxide_measurement_cluster_cfg_t co2_config = {
         .measured_value = co2.zb_value,
-        .min_measured_value = 400.0f / 1000000.0f,
-        .max_measured_value = 10000.0f / 1000000.0f,
+        .min_measured_value = CO2_IGNORE_BELOW / 1000000.0f,
+        .max_measured_value = CO2_IGNORE_ABOVE / 1000000.0f,
     };
     esp_zb_attribute_list_t *esp_zb_carbon_dioxide_meas_cluster
         = esp_zb_carbon_dioxide_measurement_cluster_create(&co2_config);
@@ -485,7 +488,7 @@ static uint16_t modbus_crc(const unsigned char * buf, int len)
 static int co2_send(const char* data, int bytes)
 {
     const char *TAG = "UART_SEND";
-    uart_flush(UART_NUM_1);
+    uart_flush(UART_NUM_1); // In case anything unsolicited/left over is present
     const int txBytes = uart_write_bytes(UART_NUM_1, data, bytes);
     if (txBytes != bytes) {
         ESP_LOGW(TAG, "send failed");
@@ -498,7 +501,7 @@ static int co2_send(const char* data, int bytes)
 static int co2_recv(int bytes)
 {
     const char *TAG = "UART_RECV";
-    int rxBytes = uart_read_bytes(UART_NUM_1, recv_buffer, RECV_BUF_SIZE, 200 / portTICK_PERIOD_MS);
+    int rxBytes = uart_read_bytes(UART_NUM_1, recv_buffer, RECV_BUF_SIZE, 250 / portTICK_PERIOD_MS);
     if (rxBytes < bytes + 2) {
         ESP_LOGW(TAG, "Received only %d bytes, wanted %d", rxBytes, bytes + 2);
         for (int i = 0; i < rxBytes; ++i) {
@@ -531,11 +534,11 @@ static void co2_task(void *arg)
     SLEEP_MS( 1000 );
     while (!co2_send(FWreq, 8) || !co2_recv(5)) {
         ESP_LOGI(TAG, "Could not query firmware version, sensor not up? Retrying...");
-        SLEEP_MS( 2000 );
+        SLEEP_MS( 1000 );
     }
     ESP_LOGI(TAG, "SenseAir S8 firmware version: %d.%d", recv_buffer[3], recv_buffer[4]);
     ESP_LOGI(TAG, "Sending initial ABC status request");
-    SLEEP_MS( 100 );
+    SLEEP_MS( 250 );
     if (!co2_send(ABCreq, 8) || !co2_recv(5)) {
         ESP_LOGW(TAG, "REQUEST FAILED");
     } else {
@@ -550,7 +553,7 @@ static void co2_task(void *arg)
             co2.abc_hours = (recv_buffer[4] * 256) + recv_buffer[5]; // !! 4+5 in this reply
         }
     }
-    SLEEP_MS( 2500 );
+    SLEEP_MS( 250 );
     light_driver_set_color_RGB(0, 0, 255);
     light_driver_set_power(true);
     // Mainloop start
@@ -559,7 +562,10 @@ static void co2_task(void *arg)
         ESP_LOGI(TAG, "Sending CO2 request");
         if (co2_send(ALLreq, 8) && co2_recv(11)) {
             uint16_t rval = (recv_buffer[9] * 256) + recv_buffer[10];
-            co2.hist[++co2.histpos % CO2_HIST_LEN] = rval;
+            if ( rval >= CO2_IGNORE_BELOW && rval <= CO2_IGNORE_ABOVE ) {
+                // Value just read is in plausible range
+                co2.hist[++co2.histpos % CO2_HIST_LEN] = rval;
+            }
             rval = 65535;
             // Use the lowest value from history to avoid sudden fluctuations from someone
             // breathing at the sensor. This can easily cause very extreme spikes.
@@ -573,22 +579,24 @@ static void co2_task(void *arg)
                     rval = co2.hist[i];
                 }
             }
-            ppm = ((float_t) rval) / 1000000.0f;
-            status = (recv_buffer[3] * 256) + recv_buffer[4];
-            if ( status != co2.status ) {
-                co2.status = status;
-                doUpdate = true;
+            if ( rval >= CO2_IGNORE_BELOW && rval <= CO2_IGNORE_ABOVE ) {
+                ppm = ((float_t) rval) / 1000000.0f;
+                status = (recv_buffer[3] * 256) + recv_buffer[4];
+                if ( status != co2.status ) {
+                    co2.status = status;
+                    doUpdate = true;
+                }
+                if ( ppm - co2.zb_value > MIN_PPM_CHANGE_REPORTED || co2.zb_value - ppm > MIN_PPM_CHANGE_REPORTED ) {
+                    co2.zb_value = ppm;
+                    doUpdate = true;
+                }
+                setLedCo2(rval);
+                ESP_LOGI(TAG, "CO2: %dppm, Status flags: %d", rval, co2.status);
             }
-            if ( ppm - co2.zb_value > MIN_PPM_CHANGE_REPORTED || co2.zb_value - ppm > MIN_PPM_CHANGE_REPORTED ) {
-                co2.zb_value = ppm;
-                doUpdate = true;
-            }
-            setLedCo2(rval);
-            ESP_LOGI(TAG, "CO2: %dppm, Status flags: %d", rval, co2.status);
         }
         if ( loopCounter == 1 ) {
             // Re-read abc hours every now and then (TODO: Make settable)
-            SLEEP_MS( 2500 );
+            SLEEP_MS( 250 );
             ESP_LOGI( TAG, "Sending ABC status request" );
             if ( co2_send( ABCreq, 8 ) && co2_recv( 5 ) ) {
                 co2.abc_hours = (recv_buffer[3] * 256) + recv_buffer[4];
