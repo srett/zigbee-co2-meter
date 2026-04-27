@@ -60,6 +60,9 @@ static uint32_t write_persistent_countdown = 0;
 
 #define schedule_persistent_write() do { write_persistent_countdown = 2; } while(0)
 
+// Bump this whenever changing anything about the zigbee config (ep/cluster/attr/reporting)
+static const uint16_t ZB_CONFIG_VER = 1;
+
 #define DATA_V1_SIZE 20
 struct persistent_data
 {
@@ -68,13 +71,13 @@ struct persistent_data
     uint16_t led_x, led_y;
     uint8_t led_level;
     uint8_t co2_led_level;
-    uint16_t padding;
+    uint16_t zb_config_version;
     uint32_t write_count;
 };
 _Static_assert(DATA_V1_SIZE == sizeof(struct persistent_data),
     "Latest persistent_data struct size messup");
 
-static struct {
+static volatile struct {
     uint16_t x, y;
     uint8_t red, green, blue;
     uint8_t level;
@@ -352,14 +355,10 @@ static void blink_task(void *arg)
         }
         light_driver_set_color_xy(led.x, led.y);
         light_driver_set_level(led.level);
-        ESP_LOGW(TAG, "Pre-delay 200");
         SLEEP_MS( 200 );
-        ESP_LOGW(TAG, "Post-delay 200");
         setLedCo2( 0 );
         if (led.on) {
-            ESP_LOGW(TAG, "Pre-delay 800");
             SLEEP_MS( 800 );
-            ESP_LOGW(TAG, "Post-delay 800");
         }
     }
 }
@@ -411,7 +410,7 @@ esp_err_t zbcb_register_device(void)
         CUSTOM_CLUSTER_ID, ATTR_CO2_BRIGHTNESS, CUSTOM_MANUFACTURER_CODE,
             ESP_ZB_ZCL_ATTR_TYPE_U8,
             ESP_ZB_ZCL_ATTR_ACCESS_READ_WRITE,
-            &led.co2_level);
+            (void*)&led.co2_level);
     ESP_LOGIW(TAG, ret, "Adding co2 brightness to custom");
     ret = esp_zb_cluster_add_manufacturer_attr(custom_cluster,
         CUSTOM_CLUSTER_ID, ATTR_CO2_LOW, CUSTOM_MANUFACTURER_CODE,
@@ -664,6 +663,7 @@ static void write_persistent_data(void)
         .co2_med = co2.co2_med,
         .co2_low = co2.co2_low,
         .co2_led_level = led.co2_level,
+        .zb_config_version = ZB_CONFIG_VER,
     };
 
     if (memcmp(&last_data, &new_data, sizeof(struct persistent_data)) == 0)
@@ -676,7 +676,7 @@ static void write_persistent_data(void)
     ESP_LOGI(TAG, "Wrote persistent data, count %" PRIu32, persistent_writes_count);
 }
 
-static void load_persistent_data(void)
+static uint16_t load_persistent_data(void)
 {
     const char *TAG = "LOAD_PERSISTENT";
     struct persistent_data data;
@@ -686,17 +686,17 @@ static void load_persistent_data(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to load persistent data, using defaults (%zu/%zu)", size, sizeof(data));
         write_persistent_countdown = 1;
-        return;
+        return 0;
     }
     if (size < DATA_V1_SIZE) {
         ESP_LOGE(TAG, "Invalid persistent data size %zu, expecting at least %u, using defaults", size, DATA_V1_SIZE);
         write_persistent_countdown = 1;
-        return;
+        return 0;
     }
     if (data.struct_size < DATA_V1_SIZE) {
         ESP_LOGW(TAG, "Invalid persistent data version %u, expecting at least %u, using defaults", data.struct_size, DATA_V1_SIZE);
         write_persistent_countdown = 1;
-        return;
+        return 0;
     }
     led.x = data.led_x;
     led.y = data.led_y;
@@ -707,6 +707,7 @@ static void load_persistent_data(void)
     led.co2_level = data.co2_led_level;
     persistent_writes_count = data.write_count;
     ESP_LOGI(TAG, "Loaded existing config, write count at %" PRIu32, persistent_writes_count);
+    return data.zb_config_version;
 }
 
 /**
@@ -714,6 +715,9 @@ static void load_persistent_data(void)
  */
 void app_main(void)
 {
+    const char *TAG = "MAIN";
+    uint16_t zbver;
+
     util_power_save_init();
     // Disable blue LED
     util_pull_low( PIN_BLUE_LED );
@@ -723,8 +727,12 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_open_from_partition(
             "my_storage", "root",
             NVS_READWRITE, &nvs_storage));
-    load_persistent_data();
-    zbc_maybe_wipe_zigbee_config(nvs_storage);
+    zbver = load_persistent_data();
+    if ( zbver != ZB_CONFIG_VER ) {
+        ESP_LOGW( TAG, "Old ZBver: %d, new ZBver: %d, wiping...", zbver, ZB_CONFIG_VER );
+        zbc_wipe_zigbee_config();
+        write_persistent_countdown = 1;
+    }
     // Setup UART for SenseAir S8
     ESP_ERROR_CHECK(util_default_uart(UART_NUM_1, PIN_RX, PIN_TX, UART_BUF_SIZE));
     // Zigbee
@@ -733,7 +741,7 @@ void app_main(void)
         .host_config.host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE,
     };
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
-    light_driver_init(LIGHT_DEFAULT_OFF);
+    light_driver_init(LIGHT_DEFAULT_OFF, true);
     xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
     xTaskCreate(co2_task, "CO2_main", 4096, NULL, 4, NULL);
     xTaskCreate(blink_task, "blink_main", 2048, NULL, 3, &taskBlink);
