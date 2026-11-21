@@ -4,14 +4,15 @@ const { Zcl } = require('zigbee-herdsman');
 const addCustomCluster = () =>
     modern.deviceAddCustomCluster('haCustomCo2', {
         ID: 0xffd0,
+        name: 'haCustomCo2',
         manufacturerCode: 0x1307,
         attributes: {
-            statusFlags: {ID: 0x0001, type: Zcl.DataType.UINT16},
-            abcHours: {ID: 0x0002, type: Zcl.DataType.UINT16},
-            co2Brightness: {ID: 0x0003, type: Zcl.DataType.UINT8, write: true},
-            co2Low: {ID: 0x0004, type: Zcl.DataType.UINT16, write: true},
-            co2Med: {ID: 0x0005, type: Zcl.DataType.UINT16, write: true},
-            co2High: {ID: 0x0006, type: Zcl.DataType.UINT16, write: true},
+            statusFlags: {name: 'statusFlags', ID: 0x0001, type: Zcl.DataType.UINT16},
+            abcHours: {name: 'abcHours', ID: 0x0002, type: Zcl.DataType.UINT16},
+            co2Brightness: {name: 'co2Brightness', ID: 0x0003, type: Zcl.DataType.UINT8, write: true},
+            co2Low: {name: 'co2Low', ID: 0x0004, type: Zcl.DataType.UINT16, write: true},
+            co2Med: {name: 'co2Med', ID: 0x0005, type: Zcl.DataType.UINT16, write: true},
+            co2High: {name: 'co2High', ID: 0x0006, type: Zcl.DataType.UINT16, write: true},
         },
         commands: {},
         commandsResponse: {},
